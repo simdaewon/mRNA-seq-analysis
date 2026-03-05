@@ -1,0 +1,400 @@
+library(dplyr)
+library(edgeR)
+library(ggrepel)
+library(ggplot2)
+
+data <- read.delim("data/Q55_rawcounts.txt", row.names = 1)
+raw_data <- data[,1:2]
+
+nrow(raw_data) #42844
+
+target_genes <- rownames(data)
+original_subset <- data[target_genes, 1:2]
+
+final_table_log2 <- data.frame(
+  Gene = target_genes,
+  Q55_Norm = data[, 1],
+  Control_Norm = data[, 2],
+  Log2FC = data[, 1] - data[, 2],
+  Avg_Expression = (original_subset[, 1] + original_subset[, 2]) / 2)
+
+
+non_zero_data <- final_table_log2$Avg_Expression[final_table_log2$Avg_Expression > 0]
+length(non_zero_data) #22882
+
+final_table <- final_table_log2 %>% 
+  filter(Avg_Expression > 0)
+
+write.csv(final_table,"final_table.csv")
+
+##########################################################################################################################################
+pca_input <- final_table %>%
+  dplyr::select(Q55_Norm, Control_Norm) %>%
+  as.matrix()
+
+rownames(pca_input) <- final_table$Gene
+
+vars <- apply(pca_input, 1, var)
+pca_input_clean <- pca_input[vars > 0, ]
+
+cat("전체 유전자:", nrow(pca_input), "\n")
+cat("분산이 0이라 제거된 유전자:", sum(vars == 0), "\n")
+cat("남은 유전자:", nrow(pca_input_clean), "\n")
+
+rownames(pca_input)[vars == 0]
+
+pca_res <- prcomp(t(pca_input_clean), scale. = TRUE)
+
+
+pca_df <- as.data.frame(pca_res$x)
+pca_df$Sample <- rownames(pca_df)
+pca_df$Group <- c("Q55", "Control") 
+
+var_explained <- round(pca_res$sdev^2 / sum(pca_res$sdev^2) * 100, 1)
+
+png(filename = "figure/PCA.png", width = 1200, height = 900, res = 150)
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 5, alpha = 0.8) +
+  theme_bw() +  
+  labs(title = "PCA Plot",
+       x = paste0("PC1 (", var_explained[1], "%)"),
+       y = paste0("PC2 (", var_explained[2], "%)")) +
+    scale_color_manual(values = c("Q55" = "#E41A1C", "Control" = "#377EB8")) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    aspect.ratio = 1)
+dev.off()
+#########################################################################################################################################
+final_table <- final_table %>%
+  mutate(Status = case_when(
+    Log2FC > 0.5 ~ "Up",
+    Log2FC < -0.5 ~ "Down",
+    TRUE ~ "Notsig"))
+
+write.csv(final_table,"data/DEG_table.csv")
+
+final_table <- final_table %>%
+  mutate(Status = factor(Status, 
+                         levels = c("Up", "Notsig", "Down")))
+
+stats <- final_table %>% 
+  group_by(Status) %>% 
+  summarise(count = n())
+
+
+up_label <- paste0("Up (", stats$count[stats$Status == "Up"], ")")
+down_label <- paste0("Down (", stats$count[stats$Status == "Down"], ")")
+notsig_label <- paste0("Non-DE (", stats$count[stats$Status == "Notsig"], ")")
+
+top_up <- final_table %>%
+  filter(Status == "Up") %>%
+  arrange(desc(Log2FC)) %>%
+  head(20)
+
+top_down <- final_table %>%
+  filter(Status == "Down") %>%
+  arrange(Log2FC) %>%
+  head(20)
+
+label_data <- rbind(top_up, top_down)
+
+
+my_colors <- c("Up" = "#E41A1C", "Down" = "#377EB8", "Notsig" = "grey80")
+
+png(filename = "figure/Scatter_plot.png", width = 1300, height = 900, res = 150)
+ggplot(final_table, aes(x = Control_Norm, y = Q55_Norm, color = Status)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  scale_color_manual(values = c("Up" = "#e41a1c", "Notsig" = "grey", "Down" = "#377eb8"), 
+                     labels = c(up_label, notsig_label, down_label)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_text_repel(data = label_data, 
+                  aes(label = Gene),
+                  size = 3.5,
+                  color = "black",
+                  fontface = "bold.italic",
+                  max.overlaps = Inf,
+                  box.padding = 0.6,
+                  point.padding = 0.3,
+                  segment.color = "grey50",
+                  show.legend = FALSE) +
+  theme_bw() +
+  labs(title = "Gene Expression Comparison",
+       subtitle = "Cut-off: |Log2FC| > 0.5",
+       x = "Log2 (Control Normalized Expression)",
+       y = "Log2 (Q55 Normalized Expression)",
+       color = "Differential Status") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 1, size = 10, face = "italic"),
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "grey80"),
+    aspect.ratio = 1)
+dev.off()
+
+#####################################################################################################################################
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+up_genes <- final_table %>% filter(Status == "Up") %>% pull(Gene)
+down_genes <- final_table %>% filter(Status == "Down") %>% pull(Gene)
+
+
+GO_BP_up <- enrichGO(gene          = up_genes,
+                   OrgDb         = org.Hs.eg.db,
+                   keyType       = 'SYMBOL',
+                   ont           = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff  = 0.05)
+
+head(summary(GO_BP_up))
+
+write.csv(GO_BP_up,"GO/GO_BP_up.csv", row.names = FALSE)
+
+GO_BP_down <- enrichGO(gene          = down_genes,
+                   OrgDb         = org.Hs.eg.db,
+                   keyType       = 'SYMBOL',
+                   ont           = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff  = 0.05)
+
+head(summary(GO_BP_down))
+write.csv(GO_BP_down,"GO/GO_BP_down.csv", row.names = FALSE)
+
+GO_MF_up <- enrichGO(gene          = up_genes,
+                     OrgDb         = org.Hs.eg.db,
+                     keyType       = 'SYMBOL',
+                     ont           = "MF",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.05)
+
+head(summary(GO_MF_up))
+
+write.csv(GO_MF_up,"GO/GO_MF_up.csv", row.names = FALSE)
+
+GO_MF_down <- enrichGO(gene          = down_genes,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = 'SYMBOL',
+                       ont           = "MF",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05)
+
+head(summary(GO_MF_down))
+write.csv(GO_MF_down,"GO/GO_MF_down.csv", row.names = FALSE)
+
+
+GO_CC_up <- enrichGO(gene          = up_genes,
+                     OrgDb         = org.Hs.eg.db,
+                     keyType       = 'SYMBOL',
+                     ont           = "CC",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.05)
+
+head(summary(GO_CC_up))
+
+write.csv(GO_CC_up,"GO/GO_CC_up.csv", row.names = FALSE)
+
+GO_CC_down <- enrichGO(gene          = down_genes,
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = 'SYMBOL',
+                       ont           = "CC",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05)
+
+head(summary(GO_CC_down))
+write.csv(GO_CC_down,"GO/GO_CC_down.csv", row.names = FALSE)
+
+########################################################################################################################################
+library(ggplot2)
+library(dplyr)
+library(DOSE)
+
+df_up_clean <- fortify(GO_BP_up, showCategory = 10) %>% mutate(Direction = "Up-regulated")
+df_down_clean <- fortify(GO_BP_down, showCategory = 10) %>% mutate(Direction = "Down-regulated")
+
+plot_df <- rbind(df_up_clean, df_down_clean) %>%
+  mutate(Direction = factor(Direction, levels = c("Up-regulated", "Down-regulated")))
+
+png(filename = "figure/GO_BP.png", width = 1800, height = 900, res = 150)
+ggplot(plot_df, aes(x = GeneRatio, y = reorder(Description, GeneRatio))) +
+  geom_point(aes(size = Count, color = p.adjust)) + 
+  scale_color_gradient(low = "#e41a1c", high = "blue") + 
+  facet_grid(. ~ Direction, scales = "free_x") +
+  theme_bw() +
+  labs(title = "GO Biological Process Enrichment",
+       x = "Gene Ratio", 
+       y = "GO Term Description",
+       size = "Gene Count",
+       color = "p.adjust") +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid.major = element_line(color = "grey95"),
+    legend.position = "right")
+dev.off()
+
+#########################################################################################################################################
+final_table_kegg <- data.frame(
+  Gene = rownames(data),
+  EntrezID = as.character(data$Entrez.ID),
+  Q55_Norm = data[, 1],
+  Control_Norm = data[, 2],
+  Log2FC = data[, 1] - data[, 2],
+  Avg_Expression = (data[, 1] + data[, 2]) / 2) %>%
+  filter(Avg_Expression > 0) %>%
+  mutate(Status = case_when(
+    Log2FC > 0.5 ~ "Up",
+    Log2FC < -0.5 ~ "Down",
+    TRUE ~ "Notsig"))
+
+
+up_entrez <- final_table_kegg %>% filter(Status == "Up") %>% pull(EntrezID)
+down_entrez <- final_table_kegg %>% filter(Status == "Down") %>% pull(EntrezID)
+
+up_entrez <- na.omit(up_entrez)
+down_entrez <- na.omit(down_entrez)
+
+kegg_up <- enrichKEGG(gene = up_entrez, organism = 'hsa', pvalueCutoff = 0.05)
+kegg_down <- enrichKEGG(gene = down_entrez, organism = 'hsa', pvalueCutoff = 0.05)
+
+df_kegg_up <- fortify(kegg_up, showCategory = 10) %>% mutate(Direction = "Up-regulated")
+df_kegg_down <- fortify(kegg_down, showCategory = 10) %>% mutate(Direction = "Down-regulated")
+
+plot_kegg <- rbind(df_kegg_up, df_kegg_down) %>%
+  mutate(Direction = factor(Direction, levels = c("Up-regulated", "Down-regulated")))
+
+png(filename = "figure/KEGG.png", width = 1500, height = 900, res = 150)
+ggplot(plot_kegg, aes(x = GeneRatio, y = reorder(Description, GeneRatio))) +
+  geom_point(aes(size = Count, color = p.adjust)) + 
+  scale_color_gradient(low = "#e41a1c", high = "blue") + 
+  facet_grid(. ~ Direction, scales = "free_x") + 
+  theme_bw() +
+  labs(title = "KEGG Pathway Enrichment Analysis",
+       x = "Gene Ratio", 
+       y = "KEGG Pathway Description",
+       size = "Gene Count",
+       color = "Adj. P-value") +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid.major = element_line(color = "grey95"),
+    legend.position = "right")
+dev.off()
+
+#########################################################################################################################################
+kegg_up_all <- enrichKEGG(gene = up_entrez, organism = 'hsa', 
+                          pvalueCutoff = 1, qvalueCutoff = 1)
+
+target_diseases <- c("Huntington disease", "Alzheimer", "Parkinson", "lateral sclerosis", "Neurodegeneration")
+df_kegg_neuro <- as.data.frame(kegg_up_all) %>%
+  filter(grepl(paste(target_diseases, collapse="|"), Description, ignore.case = TRUE))
+
+write.csv(df_kegg_neuro,"GO/Neurodegenerative.csv", row.names = FALSE)
+
+print(nrow(df_kegg_neuro))
+
+df_plot <- df_kegg_neuro %>%
+  mutate(GeneRatio_num = sapply(GeneRatio, function(x) {
+    parts <- as.numeric(unlist(strsplit(x, "/")))
+    parts[1] / parts[2]
+  }))
+
+png(filename = "figure/KEGG_Neurodegenerat.png", width = 1500, height = 700, res = 150)
+ggplot(df_plot, aes(x = GeneRatio_num, y = reorder(Description, GeneRatio_num))) +
+  geom_point(aes(size = Count, color = p.adjust)) + 
+  scale_color_gradient(low = "#e41a1c", high = "blue") + 
+  theme_bw() +
+  labs(title = "Neurodegenerative Disease Pathways: Up-regulated in Q55",
+       x = "Gene Ratio", 
+       y = "",
+       size = "Gene Count",
+       color = "p.adjust") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    panel.grid.major = element_line(color = "grey95"),
+    legend.position = "right")
+dev.off()
+
+#######################################################################################################################################
+id_to_symbol <- final_table_kegg$Gene
+names(id_to_symbol) <- final_table_kegg$EntrezID
+
+convert_ids <- function(id_string) {
+  ids <- unlist(strsplit(id_string, "/"))
+  symbols <- id_to_symbol[ids]
+  return(paste(symbols, collapse = "/"))}
+
+df_kegg_neuro_final <- df_kegg_neuro %>%
+  mutate(geneID = sapply(geneID, convert_ids))
+
+write.csv(df_kegg_neuro_final, "GO/KEGG_Neurodegenerative.csv", row.names = FALSE)
+
+
+id_to_symbol <- final_table_kegg$Gene
+names(id_to_symbol) <- final_table_kegg$EntrezID
+
+convert_ids <- function(id_string) {
+  ids <- unlist(strsplit(id_string, "/"))
+  symbols <- id_to_symbol[ids]
+  return(paste(symbols, collapse = "/"))}
+
+df_kegg_up_full <- as.data.frame(kegg_up)
+df_kegg_down_full <- as.data.frame(kegg_down)
+
+
+df_kegg_up_symbol <- df_kegg_up_full %>%
+  mutate(geneID = sapply(geneID, convert_ids))
+
+df_kegg_down_symbol <- df_kegg_down_full %>%
+  mutate(geneID = sapply(geneID, convert_ids))
+
+write.csv(df_kegg_up_symbol, "GO/KEGG_up.csv", row.names = FALSE)
+write.csv(df_kegg_down_symbol, "GO/KEGG_down.csv", row.names = FALSE)
+
+##########################################################################################################################################
+top20_up <- final_table %>%
+  filter(Status == "Up") %>%
+  filter(!grepl("^LOC", Gene)) %>%
+  slice_max(order_by = Log2FC, n = 20)
+
+top20_down <- final_table %>%
+  filter(Status == "Down") %>%
+  filter(!grepl("^LOC", Gene)) %>%
+  slice_min(order_by = Log2FC, n = 20)
+
+top40_combined <- bind_rows(top20_up, top20_down)
+
+annots <- select(org.Hs.eg.db, 
+                 keys = top40_combined$Gene, 
+                 columns = c("SYMBOL", "ENTREZID", "GENENAME"), 
+                 keytype = "SYMBOL")
+
+top40_final <- top40_combined %>%
+  left_join(annots, by = c("Gene" = "SYMBOL")) %>%
+  dplyr::select(Gene, GENENAME, Log2FC, Status) %>%
+  arrange(desc(Log2FC))
+
+
+write.csv(top40_final, "data/Top40_Description.csv", row.names = FALSE)
+
+#############################################################################################################################################
+
+gene_panels <- list(
+  "Core_MMR_panel" = c("MSH2", "MSH3", "MLH1", "PMS2", "MLH3", "FAN1", "EXO1", "LIG1", "PCNA"),
+  "DNA_damage_replication_stress_panel" = c("ATM", "ATR", "CHEK1", "CHEK2", "H2AX", "TP53BP1", "RPA1", "RAD51", "PARP1"),
+  "Proteostasis_autophagy_panel" = c("SQSTM1", "MAP1LC3B", "ATG5", "ATG7", "BECN1", "LAMP1", "TFEB"),
+  "Stress_Inflam_panel" = c("DDIT3", "ATF4", "HSPA5", "XBP1", "GADD45A", "GADD45B", "DDIT4", "CDKN1A", "BBC3", "HMOX1", "NQO1", "SOD2", "CXCL10", "CCL2", "IL6", "TNF", "NFKBIA", "IRF7", "STAT1"))
+
+
+panel_df <- stack(gene_panels)
+colnames(panel_df) <- c("Gene", "Panel")
+
+panel_data <- panel_df %>%
+  left_join(final_table, by = "Gene") %>%
+  filter(!is.na(Log2FC))
+
+write.csv(panel_data,"panel_data.csv")
