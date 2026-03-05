@@ -1,0 +1,164 @@
+library(dplyr)
+library(edgeR)
+library(ggrepel)
+library(ggplot2)
+
+data <- read.delim("data/All_norm_data.txt", row.names = 1)
+
+target_genes <- rownames(data)
+
+final_table_log2 <- data.frame(
+  Gene = target_genes,
+  Tg_Veh_Ctx = data$Tg_Veh_Ctx,
+  WT_Veh_Ctx = data$WT_Veh_Ctx,
+  Log2FC = data$Tg_Veh_Ctx - data$WT_Veh_Ctx,
+  Avg_Expression = (data$Tg_Veh_Ctx + data$WT_Veh_Ctx) / 2)
+
+final_table <- final_table_log2 %>% 
+  filter(Avg_Expression > 0)
+
+final_table <- final_table %>%
+  mutate(Status = case_when(
+    Log2FC > 0.5 ~ "Up",
+    Log2FC < -0.5 ~ "Down",
+    TRUE ~ "Notsig"
+  )) %>%
+  mutate(Status = factor(Status, levels = c("Up", "Notsig", "Down")))
+
+stats <- final_table %>% 
+  group_by(Status) %>% 
+  summarise(count = n())
+
+up_label <- paste0("Up (", sum(final_table$Status == "Up"), ")")
+down_label <- paste0("Down (", sum(final_table$Status == "Down"), ")")
+notsig_label <- paste0("Non-DE (", sum(final_table$Status == "Notsig"), ")")
+
+top_up <- final_table %>% filter(Status == "Up") %>% arrange(desc(Log2FC)) %>% head(20)
+top_down <- final_table %>% filter(Status == "Down") %>% arrange(Log2FC) %>% head(20)
+label_data <- rbind(top_up, top_down)
+
+png(filename = "figure/Scatter plot (WT vs Tg (Ctx)).png", width = 1400, height = 1000, res = 120)
+ggplot(final_table, aes(x = WT_Veh_Ctx, y = Tg_Veh_Ctx, color = Status)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  scale_color_manual(values = c("Up" = "#e41a1c", "Notsig" = "grey80", "Down" = "#377eb8"), 
+                     labels = c(up_label, notsig_label, down_label)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_text_repel(data = label_data, 
+                  aes(label = Gene),
+                  size = 3.5,
+                  color = "black",
+                  fontface = "bold.italic",
+                  max.overlaps = Inf,
+                  box.padding = 0.8,
+                  point.padding = 0.3,
+                  segment.color = "grey50",
+                  show.legend = FALSE) +
+  theme_bw() +
+  labs(title = "Gene Expression: WT vs Tg (Ctx)",
+       subtitle = "Cut-off: |Log2FC| > 0.5",
+       x = "Log2 (WT Veh Ctx)",
+       y = "Log2 (Tg Veh Ctx)",
+       color = "Differential Status") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 1, size = 10, face = "italic"),
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "grey80"),
+    aspect.ratio = 1)
+dev.off()
+
+top20_up <- final_table %>%
+  filter(Status == "Up") %>%
+  slice_max(order_by = Log2FC, n = 20)
+
+top20_down <- final_table %>%
+  filter(Status == "Down") %>%
+  slice_min(order_by = Log2FC, n = 20)
+
+top40_combined <- bind_rows(top20_up, top20_down)
+
+annots <- AnnotationDbi::select(org.Mm.eg.db, 
+                                keys = top40_combined$Gene, 
+                                columns = c("SYMBOL", "ENTREZID", "GENENAME"), 
+                                keytype = "SYMBOL")
+
+top40_final <- top40_combined %>%
+  left_join(annots, by = c("Gene" = "SYMBOL")) %>%
+  dplyr::select(Gene, GENENAME, Log2FC, Status) %>%
+  arrange(desc(Log2FC))
+
+
+write.csv(top40_final, "data/Top40_Description_WT vs Tg (Ctx).csv", row.names = FALSE)
+######################################################################################################################################
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+
+up_genes <- final_table %>% filter(Status == "Up") %>% pull(Gene)
+down_genes <- final_table %>% filter(Status == "Down") %>% pull(Gene)
+
+
+GO_BP_up <- enrichGO(gene          = up_genes,
+                     OrgDb         = org.Mm.eg.db,
+                     keyType       = 'SYMBOL',
+                     ont           = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.05)
+
+head(summary(GO_BP_up))
+
+write.csv(GO_BP_up,"data/Enrichment/WT vs Tg (Ctx)/GO_BP_up_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+GO_BP_down <- enrichGO(gene          = down_genes,
+                       OrgDb         = org.Mm.eg.db,
+                       keyType       = 'SYMBOL',
+                       ont           = "BP",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05)
+
+head(summary(GO_BP_down))
+write.csv(GO_BP_down,"data/Enrichment/WT vs Tg (Ctx)/GO_BP_down_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+GO_MF_up <- enrichGO(gene          = up_genes,
+                     OrgDb         = org.Mm.eg.db,
+                     keyType       = 'SYMBOL',
+                     ont           = "MF",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.05)
+
+head(summary(GO_MF_up))
+
+write.csv(GO_MF_up,"data/Enrichment/WT vs Tg (Ctx)/GO_MF_up_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+GO_MF_down <- enrichGO(gene          = down_genes,
+                       OrgDb         = org.Mm.eg.db,
+                       keyType       = 'SYMBOL',
+                       ont           = "MF",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05)
+
+head(summary(GO_MF_down))
+write.csv(GO_MF_down,"data/Enrichment/WT vs Tg (Ctx)/GO_MF_down_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+GO_CC_up <- enrichGO(gene          = up_genes,
+                     OrgDb         = org.Mm.eg.db,
+                     keyType       = 'SYMBOL',
+                     ont           = "CC",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff  = 0.05)
+
+head(summary(GO_CC_up))
+
+write.csv(GO_CC_up,"data/Enrichment/WT vs Tg (Ctx)/GO_CC_up_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+GO_CC_down <- enrichGO(gene          = down_genes,
+                       OrgDb         = org.Mm.eg.db,
+                       keyType       = 'SYMBOL',
+                       ont           = "CC",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05)
+
+head(summary(GO_CC_down))
+write.csv(GO_CC_down,"data/Enrichment/WT vs Tg (Ctx)/GO_CC_down_WT vs Tg (Ctx).csv", row.names = FALSE)
+
+####################################################################################################################################
