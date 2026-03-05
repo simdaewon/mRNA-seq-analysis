@@ -1,0 +1,144 @@
+library(GEOquery)
+library(hugene10sttranscriptcluster.db)
+library(sva)
+library(stringr)
+library(preprocessCore)
+library(ggrepel)
+library(RColorBrewer)
+library(pals)
+
+gse <- getGEO("GSE37517", GSEMatrix = TRUE, getGPL = TRUE)[[1]]
+
+feature_info <- fData(gse)
+feature_info$CleanSymbol <- str_extract(feature_info$gene_assignment, "(?<=//\\s)[^//\\s]+")
+
+table(!is.na(feature_info$CleanSymbol))
+
+exp_matrix <- as.data.frame(exprs(gse))
+exp_matrix$Symbol <- feature_info$CleanSymbol
+
+
+
+
+final_data <- exp_matrix %>%
+  filter(!is.na(Symbol)) %>%
+  group_by(Symbol) %>%
+  summarise(across(everything(), mean)) %>%
+  as.data.frame()
+
+rownames(final_data) <- final_data$Symbol
+final_data <- final_data[, -1]
+
+dim(final_data) 
+head(final_data[, 1:5])
+
+metadata <- pData(gse)
+
+metadata[, c("title", "characteristics_ch1")]
+
+data <- read.delim("data/Q55_rawcounts.txt", row.names = 1)
+raw_data <- data[,1:2]
+
+common_genes <- intersect(rownames(raw_data), rownames(final_data))
+cat("겹치는 유전자 개수:", length(common_genes), "\n")
+
+seq_sub <- raw_data[common_genes, ] 
+
+array_sub <- final_data[common_genes, ]
+
+combined_expr <- cbind(seq_sub, array_sub)
+
+batch_info <- c(rep("RNA-seq", 2), rep("Microarray", ncol(array_sub)))
+
+group_info <- c("Q55_iPSC", "Q55_iPSC_corr", metadata$title)
+
+vars <- apply(combined_expr, 1, var)
+combined_expr_clean <- combined_expr[vars > 0, ]
+
+qn_combined <- normalize.quantiles(as.matrix(combined_expr_clean))
+qn_combined[qn_combined < 0] <- 0  # 음수 → 0
+adjusted_expr <- ComBat(dat = qn_combined, batch = batch_info)
+
+pca_res <- prcomp(t(adjusted_expr), scale. = TRUE)
+pca_df <- as.data.frame(pca_res$x)
+pca_df$Platform <- batch_info
+pca_df$Group <- group_info
+pca_df$Sample <- rownames(pca_df)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Platform, shape = Platform)) +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 10) +
+  theme_bw() +
+  labs(title = "Combined PCA (Overlap Genes Only)",
+       subtitle = paste0("Genes used: ", length(common_genes)),
+       x = paste0("PC1 (", round(summary(pca_res)$importance[2,1]*100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_res)$importance[2,2]*100, 1), "%)"))
+
+array_groups <- metadata$title
+
+q_numbers <- str_extract(array_groups, "Q+[0-9]")
+
+
+array_q_groups <- paste0(ifelse(grepl("control", array_groups, ignore.case = TRUE), "CTL", "HD"), 
+                         "_", q_numbers)
+
+
+group_info <- c("Q55", "Q55_corr", array_q_groups)
+
+
+pca_df$Group <- factor(group_info, levels = unique(group_info))
+
+
+cell_types <- str_extract(array_groups, "NSC|MSN")
+
+q_vals <- str_extract(array_groups, "[0-9]+Q")
+
+
+array_detailed_groups <- paste0(
+  ifelse(grepl("control", array_groups, ignore.case = TRUE), "CTL", "HD"), "_",
+  cell_types, "_",
+  q_vals)
+
+
+group_info <- c("HD_iPSC_55Q", "CTL_iPSC_55Q", array_detailed_groups)
+
+
+pca_df$Group <- factor(group_info, levels = unique(group_info))
+pca_df$CellType <- c("iPSC", "iPSC", cell_types)
+
+
+
+group_names <- unique(pca_df$Group)
+group_count <- length(group_names)
+my_palette <- as.character(pals::glasbey(group_count))
+
+
+png(filename = "figure/public_pca.png", width = 1400, height = 1000, res = 150)
+ggplot(pca_df, aes(x = PC1, y = PC2, fill = Group, shape = Platform)) +
+  geom_point(size = 6, alpha = 1, color = "black", stroke = 0.8) +
+  geom_text_repel(aes(label = Group), 
+                  size = 3, 
+                  max.overlaps = 20,
+                  fontface = "bold",
+                  bg.color = "white", 
+                  bg.r = 0.15) +
+  scale_fill_manual(values = my_palette) +
+  scale_shape_manual(values = c(21, 24, 22, 23, 25)) + 
+  theme_bw() +
+  labs(
+    title = "PCA plot",
+    x = paste0("PC1 (", round(summary(pca_res)$importance[2,1]*100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca_res)$importance[2,2]*100, 1), "%)"),
+    fill = "Disease_CellType_Q",
+    shape = "Platform"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray95")
+  ) +
+  guides(fill = guide_legend(override.aes = list(shape = 21, size = 4, color = "black")))
+dev.off()
+
