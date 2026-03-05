@@ -1,0 +1,202 @@
+library(dplyr)
+library(edgeR)
+library(limma)
+library(clusterProfiler)
+library(msigdbr)
+library(dplyr)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+
+data <- read.delim("data/Q109_rawdata.txt")
+
+
+sampleinfo <- read.delim("data/sampleinfo.txt")
+
+
+rownames(data) <- data$Gene.Symbol
+counts <- data[, -1] 
+
+target_counts <- counts[, c(4,5,6, 10,11,12)]
+group <- factor(c(rep("Disease", 3), rep("Treatment", 3)))
+
+dge <- DGEList(counts = target_counts, group = group)
+
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+
+dge <- calcNormFactors(dge)
+
+dge <- estimateDisp(dge)
+et <- exactTest(dge)
+
+
+res <- topTags(et, n = Inf)$table
+
+
+res$diffexpressed <- "NO"
+res$diffexpressed[res$logFC > 1 & res$PValue < 0.05] <- "UP"
+res$diffexpressed[res$logFC < -1 & res$PValue < 0.05] <- "DOWN"
+
+gene_counts <- res %>%
+  group_by(diffexpressed) %>%
+  summarise(count = n()) %>%
+  tidyr::complete(diffexpressed = c("DOWN", "NO", "UP"), fill = list(count = 0))
+
+
+legend_labels <- c(
+  "DOWN" = paste0("DOWN (", gene_counts$count[gene_counts$diffexpressed == "DOWN"], ")"),
+  "NO" = paste0("Not Sig (", gene_counts$count[gene_counts$diffexpressed == "NO"], ")"),
+  "UP" = paste0("UP (", gene_counts$count[gene_counts$diffexpressed == "UP"], ")"))
+
+res$genelabel <- NA
+
+top_up <- res %>% 
+  filter(diffexpressed == "UP") %>% 
+  arrange(PValue) %>% 
+  head(10) %>% 
+  rownames()
+
+top_down <- res %>% 
+  filter(diffexpressed == "DOWN") %>% 
+  arrange(PValue) %>% 
+  head(10) %>% 
+  rownames()
+
+selected_genes <- c(top_up, top_down)
+res$genelabel[rownames(res) %in% selected_genes] <- rownames(res)[rownames(res) %in% selected_genes]
+
+max_fc <- max(abs(res$logFC), na.rm = TRUE) + 0.5
+
+
+png(filename = "data/Q109vsQ109_SHD280/volcano_Q109vsSHD280.png", width = 1100, height = 900, res = 130)
+ggplot(data = res, aes(x = logFC, y = -log10(PValue), col = diffexpressed)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  theme_minimal() +
+  scale_color_manual(
+    values = c("DOWN" = "blue", "NO" = "grey", "UP" = "red"),
+    labels = legend_labels
+  ) +
+  xlim(-max_fc, max_fc) + 
+  geom_vline(xintercept = c(-1, 1), col = "black", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), col = "black", linetype = "dashed") +
+  geom_text_repel(aes(label = genelabel), 
+                  size = 3, 
+                  max.overlaps = Inf, 
+                  fontface = "italic",
+                  box.padding = 0.5,
+                  show.legend = FALSE) +
+  labs(title = "Volcano Plot: Q109 vs Q109_SHD280",
+       subtitle = "|log2FC| > 1 & p-value < 0.05",
+       x = "log2 Fold Change",
+       y = "-log10(P-value)",
+       color = "Significance")  +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 1, face = "bold", size = 12, color = "grey20"), 
+    legend.position = "right")
+dev.off()
+
+
+
+top20_res <- res[rownames(res) %in% selected_genes, ]
+
+annots <- select(org.Hs.eg.db, 
+                 keys = rownames(top20_res), 
+                 columns = c("SYMBOL", "ENTREZID", "GENENAME"), 
+                 keytype = "SYMBOL")
+
+
+top20_final <- top20_res %>%
+  as.data.frame() %>%
+  mutate(SYMBOL = rownames(.)) %>%
+  left_join(annots, by = "SYMBOL") %>%
+  dplyr::select(SYMBOL, ENTREZID, GENENAME, logFC, PValue, FDR, diffexpressed) %>%
+  arrange(desc(logFC))
+
+
+
+write.csv(top20_final, "data/Q109vsQ109_SHD280/Top20_Gene_Description.csv", row.names = FALSE)
+
+######################################################################################################################################
+######################################################################################################################################
+
+
+gene_list <- res$logFC
+names(gene_list) <- rownames(res)
+
+
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+set.seed(13)
+GO_BP <- gseGO(
+  geneList     = gene_list,
+  ont          = "BP",
+  OrgDb        = org.Hs.eg.db,
+  keyType      = "SYMBOL",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE)
+
+write.csv(GO_BP, "data/Q109vsQ109_SHD280/GO_BP_Q109vsQ109_SHD280.csv")
+
+set.seed(14)
+GO_MF <- gseGO(
+  geneList     = gene_list,
+  ont          = "MF",
+  OrgDb        = org.Hs.eg.db,
+  keyType      = "SYMBOL",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE)
+
+write.csv(GO_MF, "data/Q109vsQ109_SHD280/GO_MF_Q109vsQ109_SHD280.csv")
+
+set.seed(15)
+GO_CC <- gseGO(
+  geneList     = gene_list,
+  ont          = "CC",
+  OrgDb        = org.Hs.eg.db,
+  keyType      = "SYMBOL",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE)
+
+write.csv(GO_CC, "data/Q109vsQ109_SHD280/GO_CC_Q109vsQ109_SHD280.csv")
+
+
+ids <- bitr(names(gene_list), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+kegg_gene_list <- gene_list[ids$SYMBOL]
+names(kegg_gene_list) <- ids$ENTREZID
+kegg_gene_list <- sort(kegg_gene_list, decreasing = TRUE)
+
+set.seed(16)
+KEGG <- gseKEGG(geneList = kegg_gene_list,
+                organism = 'hsa',
+                pvalueCutoff = 0.05,
+                verbose = FALSE)
+
+write.csv(KEGG, "data/Q109vsQ109_SHD280/KEGG_Q109vsQ109_SHD280.csv")
+
+
+m_h <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, gene_symbol)
+
+set.seed(17)
+Hallmark <- GSEA(gene_list, TERM2GENE = m_h, pvalueCutoff = 0.05)
+
+write.csv(Hallmark, "data/Q109vsQ109_SHD280/Hallmark_Q109vsQ109_SHD280.csv")
+
+m_c8 <- msigdbr(species = "Homo sapiens", category = "C8") %>% 
+  dplyr::select(gs_name, gene_symbol)
+
+set.seed(18)
+MSigDB_C8 <- GSEA(gene_list, TERM2GENE = m_c8, pvalueCutoff = 0.05)
+write.csv(MSigDB_C8, "data/Q109vsQ109_SHD280/MSigDB_C8_Q109vsQ109_SHD280.csv")
+
+
+hist(gene_list, breaks=100)
