@@ -1,0 +1,232 @@
+library(dplyr)
+library(edgeR)
+library(ggrepel)
+library(ggplot2)
+
+data <- read.delim("data/All_raw_counts.txt", row.names = 1)
+
+counts <- data[, 1:8]
+
+group <- factor(c("WT_Veh_Ctx", "WT_Veh_Str", "WT_Drug_Ctx", "WT_Drug_Str", 
+                  "Tg_Veh_Ctx", "Tg_Veh_Str", "Tg_Drug_Ctx", "Tg_Drug_Str"))
+
+dge <- DGEList(counts = counts, group = group)
+
+
+keep <- rowSums(dge$counts) > 0
+dge_filtered <- dge[keep, , keep.lib.sizes=FALSE]
+
+dge_filtered <- calcNormFactors(dge_filtered, method = "TMM")
+
+norm_counts_raw <- cpm(dge_filtered, log=FALSE)
+
+log2_norm_counts <- log2(norm_counts_raw + 1)
+
+sampleinfo <- read.delim("data/All_sampleinfo.txt")
+
+pca_res <- prcomp(t(log2_norm_counts))
+
+pca_data <- as.data.frame(pca_res$x)
+pca_data$SampleID <- rownames(pca_data)
+
+pca_data <- merge(pca_data, sampleinfo, by.x = "SampleID", by.y = "sample_id")
+
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+
+sample_palette <- c(
+  "WT_Veh_Ctx"  = "#1f78b4", "WT_Veh_Str"  = "#a6cee3", 
+  "WT_Drug_Ctx" = "#33a02c", "WT_Drug_Str" = "#b2df8a", 
+  "Tg_Veh_Ctx"  = "#e31a1c", "Tg_Veh_Str"  = "#fb9a99", 
+  "Tg_Drug_Ctx" = "#ff7f00", "Tg_Drug_Str" = "#fdbf6f")
+
+
+pca_data$shape_val <- ifelse(pca_data$group == "Cortex", 21, 24)
+
+pc_importance <- summary(pca_res)$importance
+pc1_var <- round(pc_importance[2, 1] * 100, 1)
+pc2_var <- round(pc_importance[2, 2] * 100, 1)
+
+png(filename = "figure/All_PCA.png", width = 1200, height = 900, res = 150)
+ggplot(pca_data, aes(x = PC1, y = PC2, fill = SampleID, shape = group)) +
+  geom_point(size = 6, alpha = 1, color = "black", stroke = 0.8) +
+  geom_text_repel(aes(label = SampleID), 
+                  size = 3.5, 
+                  fontface = "bold",
+                  max.overlaps = 20,
+                  bg.color = "white", 
+                  bg.r = 0.15) +
+  scale_fill_manual(values = sample_palette) +
+  scale_shape_manual(values = c("Cortex" = 21, "Striatum" = 24)) + 
+  theme_bw() +
+  labs(
+    title = "PCA plot",
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    fill = "Sample ID",
+    shape = "Region"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "gray95")
+  ) +
+  guides(fill = guide_legend(override.aes = list(shape = 21, size = 4)))
+dev.off()
+
+###############################################################################################################################################
+target_samples <- sampleinfo %>% 
+  filter(DEG_group %in% c("WT_Veh", "Tg_Veh")) %>% 
+  pull(sample_id)
+
+counts_subset <- counts[, target_samples]
+
+group_subset <- factor(sampleinfo %>% filter(sample_id %in% target_samples) %>% pull(DEG_group))
+group_subset <- relevel(group_subset, ref = "WT_Veh")
+
+dge_subset <- DGEList(counts = counts_subset, group = group_subset)
+
+#keep_subset <- filterByExpr(dge_subset, min.count=10) #15795
+keep_subset <- rowSums(dge_subset$counts) > 0
+sum(keep_subset) #24442
+dge_subset <- dge_subset[keep_subset, , keep.lib.sizes=FALSE]
+dge_subset <- calcNormFactors(dge_subset, method = "TMM")
+
+dge_subset <- estimateDisp(dge_subset)
+et_res <- exactTest(dge_subset)
+
+res_WT_vs_Tg <- topTags(et_res, n = Inf)$table
+res_WT_vs_Tg$Gene <- rownames(res_WT_vs_Tg)
+
+head(res_WT_vs_Tg)
+write.csv(res_WT_vs_Tg, "res_WT_vs_Tg_subset.csv")
+
+up_count <- sum(res_WT_vs_Tg$logFC > 1 & res_WT_vs_Tg$FDR < 0.05)
+down_count <- sum(res_WT_vs_Tg$logFC < -1 & res_WT_vs_Tg$FDR < 0.05)
+notsig_count <- nrow(res_WT_vs_Tg) - (up_count + down_count)
+
+up_label <- paste0("Up (", up_count, ")")
+down_label <- paste0("Down (", down_count, ")")
+notsig_label <- paste0("Not-sig (", notsig_count, ")")
+
+res_plot <- res_WT_vs_Tg %>%
+  mutate(Status = case_when(
+    logFC > 1 & FDR < 0.05 ~ "Up",
+    logFC < -1 & FDR < 0.05 ~ "Down",
+    TRUE ~ "Notsig"))
+
+top_up <- res_plot %>%
+  filter(Status == "Up") %>%
+  arrange(desc(logFC)) %>%
+  head(15)
+
+top_down <- res_plot %>%
+  filter(Status == "Down") %>%
+  arrange(logFC) %>%
+  head(15)
+
+label_data <- bind_rows(top_up, top_down)
+
+png(filename = "figure/Volcano_WT_Veh vs Tg_Veh.png", width = 1200, height = 1000, res = 150)
+ggplot(res_plot, aes(x = logFC, y = -log10(FDR), color = Status)) +
+  geom_point(alpha = 0.5, size = 1.8) +
+  scale_color_manual(values = c("Up" = "#e41a1c", "Notsig" = "grey", "Down" = "#377eb8"), 
+                     labels = c(down_label, notsig_label, up_label)) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "grey80") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_text_repel(data = label_data, 
+                  aes(label = Gene),
+                  size = 3.5,
+                  color = "black",
+                  fontface = "bold.italic",
+                  max.overlaps = 20,
+                  box.padding = 0.6,
+                  point.padding = 0.3,
+                  segment.color = "grey50",
+                  show.legend = FALSE) +
+  theme_bw() +
+  labs(title = "Volcano plot",
+       subtitle = "WT_Veh vs Tg_Veh                                                                   |Log2FC| > 1 & FDR < 0.05",
+       x = "Log2 (Fold Change)",
+       y = "-Log10 (FDR)",
+       color = "Differential Status") +
+    theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 1, size = 10, face = "italic"),
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "grey80"),
+    panel.grid.minor = element_blank(),
+    aspect.ratio = 1)
+dev.off()
+
+###############################################################################################################################################
+target_samples_drug <- sampleinfo %>% 
+  filter(DEG_group %in% c("Tg_Veh", "Tg_Drug")) %>% 
+  pull(sample_id)
+
+counts_subset_drug <- counts[, target_samples_drug]
+
+
+group_subset_drug <- factor(sampleinfo %>% filter(sample_id %in% target_samples_drug) %>% pull(DEG_group))
+group_subset_drug <- relevel(group_subset_drug, ref = "Tg_Veh")
+
+dge_subset_drug <- DGEList(counts = counts_subset_drug, group = group_subset_drug)
+
+keep_subset_drug <- rowSums(dge_subset_drug$counts) > 0
+dge_subset_drug <- dge_subset_drug[keep_subset_drug, , keep.lib.sizes=FALSE]
+dge_subset_drug <- calcNormFactors(dge_subset_drug, method = "TMM")
+
+dge_subset_drug <- estimateDisp(dge_subset_drug)
+et_res_drug <- exactTest(dge_subset_drug)
+
+res_TgVeh_vs_TgDrug <- topTags(et_res_drug, n = Inf)$table
+res_TgVeh_vs_TgDrug$Gene <- rownames(res_TgVeh_vs_TgDrug)
+
+write.csv(res_TgVeh_vs_TgDrug, "res_Tg_Veh_vs_Tg_Drug_subset.csv")
+
+
+up_count <- sum(res_TgVeh_vs_TgDrug$logFC > 1 & res_TgVeh_vs_TgDrug$FDR < 0.05)
+down_count <- sum(res_TgVeh_vs_TgDrug$logFC < -1 & res_TgVeh_vs_TgDrug$FDR < 0.05)
+notsig_count <- nrow(res_TgVeh_vs_TgDrug) - (up_count + down_count)
+
+up_label <- paste0("Up (", up_count, ")")
+down_label <- paste0("Down (", down_count, ")")
+notsig_label <- paste0("Not-sig (", notsig_count, ")")
+
+res_plot_drug <- res_TgVeh_vs_TgDrug %>%
+  mutate(Status = case_when(
+    logFC > 1 & FDR < 0.05 ~ "Up",
+    logFC < -1 & FDR < 0.05 ~ "Down",
+    TRUE ~ "Notsig"))
+
+top_up_drug <- res_plot_drug %>% filter(Status == "Up") %>% arrange(desc(logFC)) %>% head(15)
+top_down_drug <- res_plot_drug %>% filter(Status == "Down") %>% arrange(logFC) %>% head(15)
+label_data_drug <- bind_rows(top_up_drug, top_down_drug)
+
+png(filename = "figure/Volcano_Tg_Veh vs Tg_Drug.png", width = 1200, height = 1000, res = 150)
+ggplot(res_plot_drug, aes(x = logFC, y = -log10(FDR), color = Status)) +
+  geom_point(alpha = 0.5, size = 1.8) +
+  scale_color_manual(values = c("Up" = "#e41a1c", "Notsig" = "grey", "Down" = "#377eb8"), 
+                     labels = c(down_label, notsig_label, up_label)) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "grey80") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_text_repel(data = label_data_drug, aes(label = Gene),
+                  size = 3.5, color = "black", fontface = "bold.italic", max.overlaps = 20) +
+  theme_bw() +
+  labs(title = "Volcano plot",
+       subtitle = "Tg_Veh vs Tg_Drug                                                                   |Log2FC| > 1 & FDR < 0.05",
+       x = "Log2 (Fold Change)",
+       y = "-Log10 (FDR)")  +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 1, size = 10, face = "italic"),
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "grey80"),
+    panel.grid.minor = element_blank(),
+    aspect.ratio = 1)
+dev.off()
+###############################################################################################################################################
