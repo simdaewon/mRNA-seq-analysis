@@ -1,3 +1,3 @@
-Bulk RNA seq code
+#Bulk RNA seq code
 
 iPSBio derived Bulk RNA seq analysis
