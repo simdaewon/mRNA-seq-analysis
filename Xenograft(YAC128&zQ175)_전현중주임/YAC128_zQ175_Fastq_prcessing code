@@ -1,1 +1,186 @@
+cat << 'EOF' > pipeline.sh
+#!/bin/bash
 
+# ==========================================
+# 1. 경로 및 환경 설정
+# ==========================================
+FASTQ_DIR="/home/won/Bulk_RNA_seq/Fastq/YAC128_zQ175_전현중_20260312"
+RESULT_DIR="/home/won/Bulk_RNA_seq/Results"
+STAR_INDEX="/home/won/Bulk_RNA_seq/reference/STAR_index_mouse" 
+GTF_FILE="/home/won/Bulk_RNA_seq/reference/raw_data/Mus_musculus.GRCm39.110.gtf" 
+
+THREADS=22
+mkdir -p ${RESULT_DIR}
+BAM_LIST=""
+
+# ==========================================
+# 2. 샘플별 Trimming & Mapping Loop
+# ==========================================
+SAMPLES=$(ls ${FASTQ_DIR}/*_1.fastq.gz | xargs -n 1 basename | sed 's/_1.fastq.gz//')
+
+for SAMPLE in $SAMPLES; do
+    echo "=================================================="
+    echo " 🚀 Processing Sample: $SAMPLE "
+    echo "=================================================="
+    
+    SAMPLE_OUT="${RESULT_DIR}/${SAMPLE}"
+    mkdir -p ${SAMPLE_OUT}
+
+    echo "[Step A] Trimming with fastp..."
+    fastp -i ${FASTQ_DIR}/${SAMPLE}_1.fastq.gz \
+          -I ${FASTQ_DIR}/${SAMPLE}_2.fastq.gz \
+          -o ${SAMPLE_OUT}/${SAMPLE}_trimmed_1.fastq.gz \
+          -O ${SAMPLE_OUT}/${SAMPLE}_trimmed_2.fastq.gz \
+          -h ${SAMPLE_OUT}/${SAMPLE}_fastp.html \
+          -j ${SAMPLE_OUT}/${SAMPLE}_fastp.json \
+          -w ${THREADS}
+
+    echo "[Step B] Alignment with STAR..."
+    STAR --runThreadN ${THREADS} \
+         --genomeDir ${STAR_INDEX} \
+         --readFilesIn ${SAMPLE_OUT}/${SAMPLE}_trimmed_1.fastq.gz ${SAMPLE_OUT}/${SAMPLE}_trimmed_2.fastq.gz \
+         --readFilesCommand zcat \
+         --outFileNamePrefix ${SAMPLE_OUT}/${SAMPLE}_ \
+         --outSAMtype BAM SortedByCoordinate
+
+    BAM_LIST="${BAM_LIST} ${SAMPLE_OUT}/${SAMPLE}_Aligned.sortedByCoord.out.bam"
+done
+
+# ==========================================
+# 3. Final Count Matrix 생성
+# ==========================================
+echo "=================================================="
+echo " 📊 Generating Final Count Matrix "
+echo "=================================================="
+
+echo "[Step C] Counting with featureCounts..."
+featureCounts -T ${THREADS} \
+              -p \
+              -a ${GTF_FILE} \
+              -o ${RESULT_DIR}/Raw_merged_counts.txt \
+              ${BAM_LIST}
+
+cut -f1,7- ${RESULT_DIR}/Raw_merged_counts.txt | sed '1d' > ${RESULT_DIR}/Final_Counts_Matrix.txt
+
+echo " 🎉 모든 분석이 완료! "
+EOF
+
+chmod +x pipeline.sh
+nohup ./pipeline.sh &
+tail -f nohup.out
+
+head /home/won/Bulk_RNA_seq/Results/Final_Counts_Matrix.txt | column -t
+
+
+###############################IGV file indexing#################################
+
+for bam in /home/won/Bulk_RNA_seq/Results/*/*_Aligned.sortedByCoord.out.bam; do
+    echo "인덱싱 중: $bam"
+    samtools index "$bam"
+done
+echo "🎉 모든 BAM 파일 인덱싱 완료!"
+
+#############################################################################
+cd /home/won/Bulk_RNA_seq/Results
+
+cat << 'EOF' > format_counts.R
+# 1. 패키지 자동 설치 및 로드
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!require("dplyr", character.only = TRUE)) install.packages("dplyr")
+if (!require("org.Mm.eg.db", character.only = TRUE)) BiocManager::install("org.Mm.eg.db", update=FALSE, ask=FALSE)
+
+suppressPackageStartupMessages(library(org.Mm.eg.db))
+suppressPackageStartupMessages(library(dplyr))
+ 
+# 2. 데이터 불러오기 및 열 이름(샘플명) 변경
+cat("⏳ 데이터를 불러오고 열 이름을 수정...\n")
+counts <- read.table("Final_Counts_Matrix.txt", header=TRUE, check.names=FALSE, stringsAsFactors=FALSE)
+colnames(counts)[-1] <- basename(colnames(counts)[-1])
+colnames(counts)[-1] <- gsub("_Aligned.sortedByCoord.out.bam", "", colnames(counts)[-1])
+
+# 3. 앙상블 ID를 Symbol과 Entrez ID로 변환
+cat("⏳ 유전자 사전을 뒤져서 Symbol과 Entrez ID를 매핑...\n")
+counts$Geneid_clean <- gsub("\\.[0-9]+$", "", counts$Geneid)
+counts$Symbol <- mapIds(org.Mm.eg.db, keys = counts$Geneid_clean, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+counts$EntrezID <- mapIds(org.Mm.eg.db, keys = counts$Geneid_clean, column = "ENTREZID", keytype = "ENSEMBL", multiVals = "first")
+
+final_counts <- counts %>%
+  filter(!is.na(Symbol)) %>%
+  select(Symbol, EntrezID, everything()) %>%
+  select(-Geneid, -Geneid_clean)
+
+write.table(final_counts, "Final_Counts_Mapped.txt", sep="\t", quote=FALSE, row.names=FALSE)
+cat("🎉매핑 및 정리 완료! (저장된 파일명: Final_Counts_Mapped.txt)\n")
+EOF
+
+##############################################################################
+cd /home/won/Bulk_RNA_seq/Results
+
+cat << 'EOF' > rename_and_map.py
+import pandas as pd
+import mygene
+import warnings
+warnings.filterwarnings('ignore')
+
+print("⏳ 1. 데이터를 불러오고 지저분한 샘플명을 정리...")
+df = pd.read_csv("Final_Counts_Matrix.txt", sep="\t")
+
+# 열 이름(경로 및 확장자) 깔끔하게 자르기
+new_cols = []
+for col in df.columns:
+    if "Aligned.sortedByCoord" in col:
+        new_col = col.split("/")[-1].replace("_Aligned.sortedByCoord.out.bam", "")
+        new_cols.append(new_col)
+    else:
+        new_cols.append(col)
+df.columns = new_cols
+
+print("⏳ 2. 앙상블 ID를 유전자 이름(Symbol)과 Entrez ID로 변환 중")
+# 앙상블 ID 뒤에 붙은 .1, .2 같은 버전 꼬리표 떼기
+df['Ensembl_clean'] = df['Geneid'].str.split('.').str[0]
+
+# mygene 모듈로 DB 검색
+mg = mygene.MyGeneInfo()
+res = mg.querymany(df['Ensembl_clean'].tolist(), scopes='ensembl.gene', fields='symbol,entrezgene', species='mouse', as_dataframe=True, verbose=False)
+
+# 결과 정리
+res = res[['symbol', 'entrezgene']].reset_index()
+res.rename(columns={'query': 'Ensembl_clean', 'symbol': 'Symbol', 'entrezgene': 'EntrezID'}, inplace=True)
+res = res[~res['Ensembl_clean'].duplicated(keep='first')]
+
+print("⏳ 3. 기존 앙상블 ID를 삭제하고 최종 파일 생성...")
+final_df = pd.merge(res, df, on='Ensembl_clean', how='inner')
+final_df.drop(columns=['Ensembl_clean', 'Geneid'], inplace=True, errors='ignore')
+
+# 맨 앞으로 순서 당기고 저장
+cols = ['Symbol', 'EntrezID'] + [c for c in final_df.columns if c not in ['Symbol', 'EntrezID']]
+final_df = final_df[cols]
+final_df.dropna(subset=['Symbol'], inplace=True) # Symbol 없는 찌꺼기 제거
+
+final_df.to_csv("Final_Counts_Mapped.txt", sep="\t", index=False)
+print("🎉 완벽하게 변환 완료! (저장된 파일명: Final_Counts_Mapped.txt)")
+EOF
+
+python rename_and_map.py
+
+##############################################################################
+#Entriz id 정보 없는 유전자는 삭제#
+
+python -c "
+import pandas as pd
+df = pd.read_csv('Final_Counts_Mapped.txt', sep='\t')
+before = len(df)
+
+# EntrezID가 없는(NaN) 행 삭제
+df = df.dropna(subset=['EntrezID'])
+after = len(df)
+
+df['EntrezID'] = df['EntrezID'].astype(int)
+
+# 최종 파일로 저장
+df.to_csv('Final_Counts_Filtered.txt', sep='\t', index=False)
+
+print(f'✅ Entrez ID 없는 유전자 삭제 완료! (총 {before}개 ➡️ {after}개로 정리됨)')
+print('📂 최종 완성 파일명: Final_Counts_Filtered.txt')
+"
