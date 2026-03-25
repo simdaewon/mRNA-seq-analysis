@@ -45,7 +45,7 @@ log_cpm_y <- cpm(dge_y, log = TRUE)
 mod_y <- model.matrix(~ group, data = sampleinfo_y)
 mod0_y <- model.matrix(~ 1, data = sampleinfo_y)
 n.sv_y <- num.sv(log_cpm_y, mod_y, method = "be")
-print(paste("🚨 YAC128 모델 SV 개수:", n.sv_y))
+print(paste("YAC128 모델 SV 개수:", n.sv_y))
 
 if(n.sv_y > 0) {
   svobj_y <- sva(log_cpm_y, mod_y, mod0_y, n.sv = n.sv_y)
@@ -84,7 +84,7 @@ log_cpm_z <- cpm(dge_z, log = TRUE)
 mod_z <- model.matrix(~ group, data = sampleinfo_z)
 mod0_z <- model.matrix(~ 1, data = sampleinfo_z)
 n.sv_z <- num.sv(log_cpm_z, mod_z, method = "be")
-print(paste("🚨 zQ175 모델 SV 개수:", n.sv_z))
+print(paste("zQ175 모델 SV 개수:", n.sv_z))
 
 if(n.sv_z > 0) {
   svobj_z <- sva(log_cpm_z, mod_z, mod0_z, n.sv = n.sv_z)
@@ -152,7 +152,7 @@ log_cpm_y <- cpm(dge_y, log = TRUE)
 mod_y <- model.matrix(~ group, data = sampleinfo_y)
 mod0_y <- model.matrix(~ 1, data = sampleinfo_y)
 n.sv_y <- num.sv(log_cpm_y, mod_y, method = "be")
-print(paste("🚨 YAC128 모델 SV 개수:", n.sv_y))
+print(paste("YAC128 모델 SV 개수:", n.sv_y))
 
 if(n.sv_y > 0) {
   svobj_y <- sva(log_cpm_y, mod_y, mod0_y, n.sv = n.sv_y)
@@ -191,7 +191,7 @@ log_cpm_z <- cpm(dge_z, log = TRUE)
 mod_z <- model.matrix(~ group, data = sampleinfo_z)
 mod0_z <- model.matrix(~ 1, data = sampleinfo_z)
 n.sv_z <- num.sv(log_cpm_z, mod_z, method = "be")
-print(paste("🚨 zQ175 모델 SV 개수:", n.sv_z))
+print(paste("zQ175 모델 SV 개수:", n.sv_z))
 
 if(n.sv_z > 0) {
   svobj_z <- sva(log_cpm_z, mod_z, mod0_z, n.sv = n.sv_z)
