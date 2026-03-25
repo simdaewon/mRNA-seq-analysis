@@ -1,0 +1,185 @@
+library(dplyr)
+library(edgeR)
+library(limma)
+library(sva)
+library(clusterProfiler)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(ggrepel)
+library(biomaRt)
+library(RColorBrewer)
+library(patchwork)
+
+
+mouse <- read.delim("data/mouse_rawcounts.txt")
+nrow(mouse)
+mouse <- subset(mouse, select = -c(Entrez.ID, Start, End))
+
+sampleinfo <- read.delim("data/sampleinfo.txt")
+sampleinfo$sample_id <- gsub("-", ".", sampleinfo$sample_id)
+
+mouse$TotalCount <- rowSums(mouse[, sampleinfo$sample_id])
+mouse <- mouse[order(mouse$Gene.Symbol, mouse$TotalCount, decreasing = TRUE), ]
+mouse_unique <- mouse[!duplicated(mouse$Gene.Symbol), ]
+
+counts <- mouse_unique[, sampleinfo$sample_id]
+rownames(counts) <- mouse_unique$Gene.Symbol
+
+group_levels <- levels(factor(sampleinfo$group))
+group_colors <- brewer.pal(n = length(group_levels), name = "Set1")
+names(group_colors) <- group_levels
+
+common_shapes <- c(21, 22, 23)
+
+
+sampleinfo_y <- sampleinfo %>% filter(grepl("^Y_", group))
+y_counts <- counts[, sampleinfo_y$sample_id]
+y_group <- factor(sampleinfo_y$group)
+
+dge_y <- DGEList(counts = y_counts, group = y_group)
+#keep_y <- rowSums(dge_y$counts) > 0
+keep_y <- filterByExpr(dge_y) 
+dge_y <- dge_y[keep_y, , keep.lib.sizes = FALSE]
+dge_y <- calcNormFactors(dge_y)
+log_cpm_y <- cpm(dge_y, log = TRUE)
+
+mod_y <- model.matrix(~ group, data = sampleinfo_y)
+mod0_y <- model.matrix(~ 1, data = sampleinfo_y)
+n.sv_y <- num.sv(log_cpm_y, mod_y, method = "be")
+print(paste("🚨 YAC128 모델 숨겨진 노이즈(SV) 개수:", n.sv_y))
+
+if(n.sv_y > 0) {
+  svobj_y <- sva(log_cpm_y, mod_y, mod0_y, n.sv = n.sv_y)
+  log_cpm_y_clean <- removeBatchEffect(log_cpm_y, covariates = svobj_y$sv)
+} else {
+  log_cpm_y_clean <- log_cpm_y
+}
+
+
+pca_y <- prcomp(t(log_cpm_y_clean), scale. = FALSE)
+pca_y_df <- as.data.frame(pca_y$x) %>%
+  mutate(SampleID = rownames(.), group = y_group)
+y_var <- round(summary(pca_y)$importance[2, 1:2] * 100, 1)
+y_shape_map <- setNames(common_shapes, levels(y_group))
+
+p_y <- ggplot(pca_y_df, aes(x = PC1, y = PC2, fill = group, shape = group)) +
+  stat_ellipse(aes(color = group), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(size = 7, alpha = 0.8, color = "black", stroke = 1.2) +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  scale_shape_manual(values = y_shape_map) +
+  theme_bw() +
+  labs(title = "YAC128 Model (SVA Corrected)",
+       subtitle = paste0("Genes: ", nrow(log_cpm_y_clean), " / SVs removed: ", n.sv_y),
+       x = paste0("PC1 (", y_var[1], "%)"),
+       y = paste0("PC2 (", y_var[2], "%)"),
+       fill = "Group", shape = "Group") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+        plot.subtitle = element_text(hjust = 0.5, size = 10, color = "red"))
+
+
+sampleinfo_z <- sampleinfo %>% filter(grepl("^z_", group))
+z_counts <- counts[, sampleinfo_z$sample_id]
+z_group <- factor(sampleinfo_z$group)
+
+dge_z <- DGEList(counts = z_counts, group = z_group)
+#keep_z <- rowSums(dge_z$counts) > 0
+keep_z <- filterByExpr(dge_z)
+dge_z <- dge_z[keep_z, , keep.lib.sizes = FALSE]
+dge_z <- calcNormFactors(dge_z)
+log_cpm_z <- cpm(dge_z, log = TRUE)
+
+mod_z <- model.matrix(~ group, data = sampleinfo_z)
+mod0_z <- model.matrix(~ 1, data = sampleinfo_z)
+n.sv_z <- num.sv(log_cpm_z, mod_z, method = "be")
+print(paste("🚨 zQ175 모델 숨겨진 노이즈(SV) 개수:", n.sv_z))
+
+if(n.sv_z > 0) {
+  svobj_z <- sva(log_cpm_z, mod_z, mod0_z, n.sv = n.sv_z)
+  log_cpm_z_clean <- removeBatchEffect(log_cpm_z, covariates = svobj_z$sv)
+} else {
+  log_cpm_z_clean <- log_cpm_z
+}
+
+
+pca_z <- prcomp(t(log_cpm_z_clean), scale. = FALSE)
+pca_z_df <- as.data.frame(pca_z$x) %>%
+  mutate(SampleID = rownames(.), group = z_group)
+z_var <- round(summary(pca_z)$importance[2, 1:2] * 100, 1)
+z_shape_map <- setNames(common_shapes, levels(z_group))
+
+p_z <- ggplot(pca_z_df, aes(x = PC1, y = PC2, fill = group, shape = group)) +
+  stat_ellipse(aes(color = group), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(size = 7, alpha = 0.8, color = "black", stroke = 1.2) +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  scale_shape_manual(values = z_shape_map) +
+  theme_bw() +
+  labs(title = "zQ175 Model (SVA Corrected)",
+       subtitle = paste0("Genes: ", nrow(log_cpm_z_clean), " / SVs removed: ", n.sv_z),
+       x = paste0("PC1 (", z_var[1], "%)"),
+       y = paste0("PC2 (", z_var[2], "%)"),
+       fill = "Group", shape = "Group") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+        plot.subtitle = element_text(hjust = 0.5, size = 10, color = "red"))
+
+
+final_pca <- p_y + p_z + plot_layout(guides = "collect")
+
+png(filename = "figure/PCA_SDW_rowsum_SVA.png", width = 1800, height = 1000, res = 160)
+print(final_pca)
+dev.off()
+
+############################################################################################################################################
+dge <- DGEList(counts = counts, group = group)
+
+#keep <- rowSums(dge$counts) > 0 #32649
+
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+nrow(dge) #17955
+
+dge <- calcNormFactors(dge)
+
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+
+
+my_contrasts <- makeContrasts(
+  Y_TG_vs_WT     = Y_TG_VC - Y_WT_VC,
+  Y_NPC_vs_VC    = Y_TG_NPC - Y_TG_VC,
+  z_Hetero_vs_WT = z_Hetero_VC - z_WT_VC,
+  z_NPC_vs_VC    = z_Hetero_NPC - z_Hetero_VC,
+  levels = design)
+
+final_results_list <- list()
+
+for (comp_name in colnames(my_contrasts)) {
+  qlf <- glmQLFTest(fit, contrast = my_contrasts[, comp_name])
+  res <- topTags(qlf, n = Inf)$table
+  active_groups <- names(which(my_contrasts[, comp_name] != 0))
+  active_samples <- sampleinfo$sample_id[sampleinfo$group %in% active_groups]
+  subset_counts <- counts[rownames(res), active_samples]
+  subset_cpm_log <- cpm(subset_counts, log = TRUE)
+  res$logCPM_group_specific <- rowMeans(subset_cpm_log)
+  
+  res_final <- res %>%
+    mutate(Gene = rownames(res)) %>%
+    cbind(subset_counts) %>%
+    relocate(Gene, .before = 1) %>%
+    relocate(all_of(active_samples), .after = Gene) %>%
+    relocate(logCPM_group_specific, .after = last_col()) %>%
+    relocate(logFC, .after = logCPM_group_specific) %>%
+    relocate(FDR, .after = last_col()) %>%
+    dplyr::select(-logCPM)
+  
+
+  final_results_list[[comp_name]] <- res_final
+  write.csv(res_final, 
+            file = paste0("data/DEG_Final_", comp_name, ".csv"), 
+            row.names = FALSE)
+  message(paste0("Success: ", comp_name, " (Samples: ", paste(active_samples, collapse=", "), ")"))}
