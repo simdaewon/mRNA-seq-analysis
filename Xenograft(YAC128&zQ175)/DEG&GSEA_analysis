@@ -1,0 +1,364 @@
+library(org.Mm.eg.db)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(edgeR)
+library(AnnotationDbi)
+library(clusterProfiler)
+library(enrichplot)
+
+
+mouse <- read.delim("data/Final_Counts_Filtered.txt")
+mouse <- subset(mouse, select = -c(EntrezID))
+
+sampleinfo <- read.delim("data/sampleinfo.txt")
+sampleinfo$sample_id <- gsub("-", ".", sampleinfo$sample_id)
+sampleinfo$sample_id <- gsub("\\.host", "", sampleinfo$sample_id)
+
+mouse$TotalCount <- rowSums(mouse[, sampleinfo$sample_id])
+mouse <- mouse[order(mouse$Symbol, mouse$TotalCount, decreasing = TRUE), ]
+mouse_unique <- mouse[!duplicated(mouse$Symbol), ]
+
+counts <- mouse_unique[, sampleinfo$sample_id]
+
+
+rownames(counts) <- mouse_unique$Symbol
+
+#counts <- counts[!grepl("^Gm[0-9]+", rownames(counts)), ]
+#counts <- counts[!grepl("Rik$", rownames(counts)), ]
+
+group_levels <- levels(factor(sampleinfo$group))
+group_colors <- brewer.pal(n = length(group_levels), name = "Set1")
+names(group_colors) <- group_levels
+
+common_shapes <- c(21, 22, 23)
+
+
+sampleinfo_y <- sampleinfo %>% filter(grepl("^Y_", group))
+y_counts <- counts[, sampleinfo_y$sample_id]
+y_group <- factor(sampleinfo_y$group)
+
+dge_y <- DGEList(counts = y_counts, group = y_group)
+dge_y <- dge_y[filterByExpr(dge_y), , keep.lib.sizes = FALSE]
+dge_y <- calcNormFactors(dge_y)
+log_cpm_y <- cpm(dge_y, log = TRUE)
+
+mod_y <- model.matrix(~ group, data = sampleinfo_y)
+mod0_y <- model.matrix(~ 1, data = sampleinfo_y)
+n.sv_y <- num.sv(log_cpm_y, mod_y, method = "be")
+print(paste("🚨 YAC128 모델 SV 개수:", n.sv_y))
+
+if(n.sv_y > 0) {
+  svobj_y <- sva(log_cpm_y, mod_y, mod0_y, n.sv = n.sv_y)
+  log_cpm_y_clean <- removeBatchEffect(log_cpm_y, covariates = svobj_y$sv, design = mod_y)
+} else {
+  log_cpm_y_clean <- log_cpm_y
+}
+
+pca_y <- prcomp(t(log_cpm_y_clean), scale. = FALSE)
+pca_y_df <- as.data.frame(pca_y$x) %>% mutate(group = y_group)
+y_var <- round(summary(pca_y)$importance[2, 1:2] * 100, 1)
+
+p_y <- ggplot(pca_y_df, aes(x = PC1, y = PC2, fill = group, shape = group)) +
+  stat_ellipse(aes(color = group), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(size = 7, alpha = 0.8, color = "black", stroke = 1.2) +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  scale_shape_manual(values = setNames(common_shapes, levels(y_group))) +
+  theme_bw() +
+  labs(title = "YAC128 Model (SVA Corrected)",
+       subtitle = paste0("Genes: ", nrow(log_cpm_y_clean), " / SVs: ", n.sv_y),
+       x = paste0("PC1 (", y_var[1], "%)"), y = paste0("PC2 (", y_var[2], "%)")) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+        plot.subtitle = element_text(hjust = 0.5, color = "red"))
+
+
+sampleinfo_z <- sampleinfo %>% filter(grepl("^z_", group))
+z_counts <- counts[, sampleinfo_z$sample_id]
+z_group <- factor(sampleinfo_z$group)
+
+dge_z <- DGEList(counts = z_counts, group = z_group)
+dge_z <- dge_z[filterByExpr(dge_z), , keep.lib.sizes = FALSE]
+dge_z <- calcNormFactors(dge_z)
+log_cpm_z <- cpm(dge_z, log = TRUE)
+
+mod_z <- model.matrix(~ group, data = sampleinfo_z)
+mod0_z <- model.matrix(~ 1, data = sampleinfo_z)
+n.sv_z <- num.sv(log_cpm_z, mod_z, method = "be")
+print(paste("🚨 zQ175 모델 SV 개수:", n.sv_z))
+
+if(n.sv_z > 0) {
+  svobj_z <- sva(log_cpm_z, mod_z, mod0_z, n.sv = n.sv_z)
+  log_cpm_z_clean <- removeBatchEffect(log_cpm_z, covariates = svobj_z$sv, design = mod_z)
+} else {
+  log_cpm_z_clean <- log_cpm_z
+}
+
+pca_z <- prcomp(t(log_cpm_z_clean), scale. = FALSE)
+pca_z_df <- as.data.frame(pca_z$x) %>% mutate(group = z_group)
+z_var <- round(summary(pca_z)$importance[2, 1:2] * 100, 1)
+
+p_z <- ggplot(pca_z_df, aes(x = PC1, y = PC2, fill = group, shape = group)) +
+  stat_ellipse(aes(color = group), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(size = 7, alpha = 0.8, color = "black", stroke = 1.2) +
+  scale_fill_manual(values = group_colors) +
+  scale_color_manual(values = group_colors) +
+  scale_shape_manual(values = setNames(common_shapes, levels(z_group))) +
+  theme_bw() +
+  labs(title = "zQ175 Model (SVA Corrected)",
+       subtitle = paste0("Genes: ", nrow(log_cpm_z_clean), " / SVs: ", n.sv_z),
+       x = paste0("PC1 (", z_var[1], "%)"), y = paste0("PC2 (", z_var[2], "%)")) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+        plot.subtitle = element_text(hjust = 0.5, color = "red"))
+
+
+final_pca <- p_y + p_z + plot_layout(guides = "collect") & theme(legend.position = "right")
+
+png(filename = "figure/PCA_SDW_SVA.png", width = 1800, height = 1000, res = 160)
+print(final_pca)
+dev.off()
+
+###############################################################################################################################
+
+design_y_edgeR <- model.matrix(~ 0 + group, data = sampleinfo_y)
+colnames(design_y_edgeR) <- gsub("group", "", colnames(design_y_edgeR))
+
+if(n.sv_y > 0) {
+  colnames(svobj_y$sv) <- paste0("SV", 1:n.sv_y)
+  design_y_edgeR <- cbind(design_y_edgeR, svobj_y$sv)
+}
+
+
+dge_y <- estimateDisp(dge_y, design_y_edgeR)
+
+fit_y_edgeR <- glmQLFit(dge_y, design_y_edgeR)
+
+
+cont_matrix_y_edgeR <- makeContrasts(
+  TG_vs_WT = Y_TG_VC - Y_WT_VC,      
+  NPC_vs_TG = Y_TG_NPC - Y_TG_VC,    
+  levels = design_y_edgeR)
+
+
+qlf_TG_vs_WT <- glmQLFTest(fit_y_edgeR, contrast = cont_matrix_y_edgeR[, "TG_vs_WT"])
+res_edgeR_TG_vs_WT <- topTags(qlf_TG_vs_WT, n = Inf)$table
+
+qlf_NPC_vs_TG <- glmQLFTest(fit_y_edgeR, contrast = cont_matrix_y_edgeR[, "NPC_vs_TG"])
+res_edgeR_NPC_vs_TG <- topTags(qlf_NPC_vs_TG, n = Inf)$table
+
+write.csv(res_edgeR_TG_vs_WT, "data/DEG_YAC128_TG_vs_WT.csv", row.names = TRUE)
+write.csv(res_edgeR_NPC_vs_TG, "data/DEG_YAC128_NPC_vs_TG.csv", row.names = TRUE)
+
+########################################################################################################################################
+design_z_edgeR <- model.matrix(~ 0 + group, data = sampleinfo_z)
+colnames(design_z_edgeR) <- gsub("group", "", colnames(design_z_edgeR))
+
+if(n.sv_z > 0) {
+  colnames(svobj_z$sv) <- paste0("SV", 1:n.sv_z)
+  design_z_edgeR <- cbind(design_z_edgeR, svobj_z$sv)
+}
+
+
+dge_z <- estimateDisp(dge_z, design_z_edgeR)
+
+
+fit_z_edgeR <- glmQLFit(dge_z, design_z_edgeR)
+
+
+cont_matrix_z_edgeR <- makeContrasts(
+  TG_vs_WT = z_Hetero_VC - z_WT_VC,
+  NPC_vs_TG = z_Hetero_NPC - z_Hetero_VC,
+  levels = design_z_edgeR)
+
+
+qlf_z_TG_vs_WT <- glmQLFTest(fit_z_edgeR, contrast = cont_matrix_z_edgeR[, "TG_vs_WT"])
+res_edgeR_z_TG_vs_WT <- topTags(qlf_z_TG_vs_WT, n = Inf)$table
+
+qlf_z_NPC_vs_TG <- glmQLFTest(fit_z_edgeR, contrast = cont_matrix_z_edgeR[, "NPC_vs_TG"])
+res_edgeR_z_NPC_vs_TG <- topTags(qlf_z_NPC_vs_TG, n = Inf)$table
+
+write.csv(res_edgeR_z_TG_vs_WT, "data/DEG_zQ175_TG_vs_WT.csv", row.names = TRUE)
+write.csv(res_edgeR_z_NPC_vs_TG, "data/DEG_zQ175_NPC_vs_TG.csv", row.names = TRUE)
+
+########################################################################################################################################
+volcano_data_y <- as.data.frame(res_edgeR_z_TG_vs_WT)
+volcano_data_y$Symbol <- rownames(volcano_data_y)
+
+volcano_data_y <- volcano_data_y %>%
+  filter(!grepl("^Gm[0-9]+", Symbol)) %>%
+  filter(!grepl("Rik$", Symbol))
+
+
+logFC_cutoff <- 1
+pval_cutoff  <- 0.05
+
+volcano_data_y <- volcano_data_y %>%
+  mutate(
+    Significance = case_when(
+      logFC > logFC_cutoff & PValue < pval_cutoff ~ "Up",
+      logFC < -logFC_cutoff & PValue < pval_cutoff ~ "Down",
+      TRUE ~ "Not Significant"
+    )
+  )
+
+counts <- table(volcano_data_y$Significance)
+
+count_up <- ifelse(is.na(counts["Up"]), 0, counts["Up"])
+count_down <- ifelse(is.na(counts["Down"]), 0, counts["Down"])
+count_ns <- ifelse(is.na(counts["Not Significant"]), 0, counts["Not Significant"])
+
+label_up <- paste0("Up (", count_up, ")")
+label_down <- paste0("Down (", count_down, ")")
+label_ns <- paste0("Not Significant (", count_ns, ")")
+
+top_up <- volcano_data_y %>% 
+  filter(Significance == "Up") %>% 
+  arrange(PValue) %>% 
+  head(15)
+
+top_down <- volcano_data_y %>% 
+  filter(Significance == "Down") %>% 
+  arrange(PValue) %>% 
+  head(15)
+
+top_genes <- bind_rows(top_up, top_down)
+
+max_x <- max(abs(volcano_data_y$logFC), na.rm = TRUE) * 1.05
+
+p_volcano_y <- ggplot(volcano_data_y, aes(x = logFC, y = -log10(PValue), color = Significance)) +
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_manual(
+    values = c("Up" = "#E41A1C", "Down" = "#377EB8", "Not Significant" = "grey80"),
+    labels = c("Up" = label_up, "Down" = label_down, "Not Significant" = label_ns)
+  ) +
+  scale_x_continuous(limits = c(-max_x, max_x)) +
+  geom_vline(xintercept = c(-logFC_cutoff, logFC_cutoff), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_hline(yintercept = -log10(pval_cutoff), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_text_repel(data = top_genes, aes(label = Symbol), 
+                  size = 4, color = "black", fontface = "italic",
+                  box.padding = 0.5, max.overlaps = Inf) +
+  theme_bw() +
+  labs(
+    title = "zQ175 (TG vs WT)",
+    subtitle = paste0("Cutoff: |logFC| > ", logFC_cutoff, " & P-value < ", pval_cutoff),
+    x = "Log2 Fold Change",
+    y = "-Log10(P-value)" 
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 1, face = "italic", color = "grey20"), 
+    legend.position = "right",
+    legend.title = element_blank()
+  )
+
+png(filename = "figure/Volcano_zQ175_TG_vs_WT_v1.png", width = 1500, height = 1000, res = 150)
+print(p_volcano_y)
+dev.off()
+
+########################################################################################################################################
+
+extract_top40_deg <- function(deg_data, save_path) {
+  df <- as.data.frame(deg_data)
+  df$Symbol <- rownames(df)
+  df_filtered <- df %>%
+    filter(PValue < 0.05) %>%
+    filter(!grepl("^Gm[0-9]+", Symbol)) %>%
+    filter(!grepl("Rik$", Symbol))
+  top_up <- df_filtered %>%
+    filter(logFC > 0) %>%
+    arrange(desc(logFC)) %>%
+    head(20) %>%
+    mutate(Status = "Up")
+    top_down <- df_filtered %>%
+    filter(logFC < 0) %>%
+    arrange(logFC) %>%
+    head(20) %>%
+    arrange(desc(logFC)) %>%
+    mutate(Status = "Down")
+  top40_combined <- bind_rows(top_up, top_down)
+  top40_combined$GENENAME <- mapIds(org.Mm.eg.db,
+                                    keys = top40_combined$Symbol,
+                                    column = "GENENAME",
+                                    keytype = "SYMBOL",
+                                    multiVals = "first")
+  top40_combined <- top40_combined %>%
+    dplyr::select(Symbol, GENENAME, logFC, Status) 
+  write.csv(top40_combined, save_path, row.names = FALSE)
+  return(top40_combined)}
+
+
+top40_y_TG_WT <- extract_top40_deg(res_edgeR_TG_vs_WT, "results/Top40_DEG_YAC128_TG_vs_WT.csv")
+top40_y_NPC_TG <- extract_top40_deg(res_edgeR_NPC_vs_TG, "results/Top40_DEG_YAC128_NPC_vs_TG.csv")
+top40_z_TG_WT <- extract_top40_deg(res_edgeR_z_TG_vs_WT, "results/Top40_DEG_zQ175_TG_vs_WT.csv")
+top40_z_NPC_TG <- extract_top40_deg(res_edgeR_z_NPC_vs_TG, "results/Top40_DEG_zQ175_NPC_vs_TG.csv")
+
+########################################################################################################################################
+
+gsea_data <- as.data.frame(res_edgeR_z_TG_vs_WT)
+gsea_data$Symbol <- rownames(gsea_data)
+
+gsea_data <- gsea_data %>%
+  filter(!grepl("^Gm[0-9]+", Symbol)) %>%
+  filter(!grepl("Rik$", Symbol))
+
+
+gsea_data <- gsea_data %>% arrange(desc(logFC))
+
+gene_list <- gsea_data$logFC
+names(gene_list) <- gsea_data$Symbol
+
+set.seed(123) # 결과 재현성을 위해 시드 고정
+gse_go_y <- gseGO(
+  geneList     = gene_list,
+  OrgDb        = org.Mm.eg.db,
+  keyType      = "SYMBOL",
+  ont          = "BP",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE)
+
+print(head(as.data.frame(gse_go_y)[, c("ID", "Description", "enrichmentScore", "p.adjust")]))
+
+write.csv(gse_go_y,"results/zQ175/GO_BP_zQ175 TG vs WT.csv")
+
+#####################################################################################################################################
+mouse_raw <- read.delim("data/Final_Counts_Filtered.txt")
+
+gene_mapping <- mouse_raw[, c("Symbol", "EntrezID")]
+gene_mapping <- gene_mapping[!duplicated(gene_mapping$Symbol), ]
+
+gsea_data <- as.data.frame(res_edgeR_TG_vs_WT)
+gsea_data$Symbol <- rownames(gsea_data)
+
+gsea_data <- gsea_data %>%
+  filter(!grepl("^Gm[0-9]+", Symbol)) %>%
+  filter(!grepl("Rik$", Symbol))
+
+gsea_data <- left_join(gsea_data, gene_mapping, by = "Symbol")
+
+gsea_data_kegg <- gsea_data %>%
+  filter(!is.na(EntrezID)) %>%
+  arrange(desc(logFC))
+
+gene_list_kegg <- gsea_data_kegg$logFC
+names(gene_list_kegg) <- as.character(gsea_data_kegg$EntrezID)
+
+
+set.seed(123)
+gse_kegg_y <- gseKEGG(
+  geneList     = gene_list_kegg,
+  organism     = 'mmu',
+  keyType      = "kegg",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE)
+
+gse_kegg_y_readable <- setReadable(gse_kegg_y, OrgDb = org.Mm.eg.db, keyType="ENTREZID")
+
+kegg_result_df <- as.data.frame(gse_kegg_y_readable)
+print(head(kegg_result_df[, c("ID", "Description", "enrichmentScore", "p.adjust")]))
+
+write.csv(kegg_result_df, "results/YAC128/KEGG_YAC128_TG_vs_WT.csv", row.names = FALSE)
+
