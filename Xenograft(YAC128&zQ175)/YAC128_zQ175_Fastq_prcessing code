@@ -62,7 +62,7 @@ featureCounts -T ${THREADS} \
 
 cut -f1,7- ${RESULT_DIR}/Raw_merged_counts.txt | sed '1d' > ${RESULT_DIR}/Final_Counts_Matrix.txt
 
-echo " 🎉 모든 분석이 완료! "
+echo " 분석 완료 "
 EOF
 
 chmod +x pipeline.sh
@@ -78,7 +78,7 @@ for bam in /home/won/Bulk_RNA_seq/Results/*/*_Aligned.sortedByCoord.out.bam; do
     echo "인덱싱 중: $bam"
     samtools index "$bam"
 done
-echo "🎉 모든 BAM 파일 인덱싱 완료!"
+echo "모든 BAM 파일 인덱싱 완료"
 
 #############################################################################
 cd /home/won/Bulk_RNA_seq/Results
@@ -94,13 +94,13 @@ suppressPackageStartupMessages(library(org.Mm.eg.db))
 suppressPackageStartupMessages(library(dplyr))
  
 # 2. 데이터 불러오기 및 열 이름(샘플명) 변경
-cat("⏳ 데이터를 불러오고 열 이름을 수정...\n")
+cat("데이터를 불러오고 열 이름을 수정...\n")
 counts <- read.table("Final_Counts_Matrix.txt", header=TRUE, check.names=FALSE, stringsAsFactors=FALSE)
 colnames(counts)[-1] <- basename(colnames(counts)[-1])
 colnames(counts)[-1] <- gsub("_Aligned.sortedByCoord.out.bam", "", colnames(counts)[-1])
 
 # 3. 앙상블 ID를 Symbol과 Entrez ID로 변환
-cat("⏳ 유전자 사전을 뒤져서 Symbol과 Entrez ID를 매핑...\n")
+cat("유전자 사전을 뒤져서 Symbol과 Entrez ID를 매핑...\n")
 counts$Geneid_clean <- gsub("\\.[0-9]+$", "", counts$Geneid)
 counts$Symbol <- mapIds(org.Mm.eg.db, keys = counts$Geneid_clean, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
 counts$EntrezID <- mapIds(org.Mm.eg.db, keys = counts$Geneid_clean, column = "ENTREZID", keytype = "ENSEMBL", multiVals = "first")
@@ -123,7 +123,7 @@ import mygene
 import warnings
 warnings.filterwarnings('ignore')
 
-print("⏳ 1. 데이터를 불러오고 지저분한 샘플명을 정리...")
+print("1. 데이터를 불러오고 지저분한 샘플명을 정리...")
 df = pd.read_csv("Final_Counts_Matrix.txt", sep="\t")
 
 # 열 이름(경로 및 확장자) 깔끔하게 자르기
@@ -149,7 +149,7 @@ res = res[['symbol', 'entrezgene']].reset_index()
 res.rename(columns={'query': 'Ensembl_clean', 'symbol': 'Symbol', 'entrezgene': 'EntrezID'}, inplace=True)
 res = res[~res['Ensembl_clean'].duplicated(keep='first')]
 
-print("⏳ 3. 기존 앙상블 ID를 삭제하고 최종 파일 생성...")
+print("3. 기존 앙상블 ID를 삭제하고 최종 파일 생성...")
 final_df = pd.merge(res, df, on='Ensembl_clean', how='inner')
 final_df.drop(columns=['Ensembl_clean', 'Geneid'], inplace=True, errors='ignore')
 
@@ -159,7 +159,7 @@ final_df = final_df[cols]
 final_df.dropna(subset=['Symbol'], inplace=True) # Symbol 없는 찌꺼기 제거
 
 final_df.to_csv("Final_Counts_Mapped.txt", sep="\t", index=False)
-print("🎉 완벽하게 변환 완료! (저장된 파일명: Final_Counts_Mapped.txt)")
+print("변환 완료 (저장된 파일명: Final_Counts_Mapped.txt)")
 EOF
 
 python rename_and_map.py
@@ -181,6 +181,6 @@ df['EntrezID'] = df['EntrezID'].astype(int)
 # 최종 파일로 저장
 df.to_csv('Final_Counts_Filtered.txt', sep='\t', index=False)
 
-print(f'✅ Entrez ID 없는 유전자 삭제 완료! (총 {before}개 ➡️ {after}개로 정리됨)')
-print('📂 최종 완성 파일명: Final_Counts_Filtered.txt')
+print(f'Entrez ID 없는 유전자 삭제 완료! (총 {before}개 -> {after}개로 정리됨)')
+print('최종 완성 파일명: Final_Counts_Filtered.txt')
 "
